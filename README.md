@@ -18,6 +18,9 @@ hcp_org     = "<your HCP org>"
 alert_email = "<you@example.com>"
 EOF
 terraform init && terraform apply
+
+# CI identities are RG-scoped and can't register resource providers themselves.
+az provider register --namespace Microsoft.App --wait
 ```
 
 Then give CI access to state (team token from HCP → Settings → Teams → owners):
