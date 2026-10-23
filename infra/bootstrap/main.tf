@@ -79,6 +79,7 @@ resource "azuread_service_principal" "gh" {
 
 # Only workflow jobs running in this repo's matching GitHub Environment can assume the identity.
 resource "azuread_application_federated_identity_credential" "gh" {
+  #checkov:skip=CKV_AZURE_249:Check only parses the legacy repo:owner/name subject; the ID-pinned subject below is stricter.
   for_each       = local.identities
   application_id = azuread_application.gh[each.key].id
   display_name   = "github-${each.key}"
