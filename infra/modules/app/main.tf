@@ -38,6 +38,11 @@ resource "azurerm_static_web_app" "web" {
   location            = var.swa_location
   sku_tier            = "Free"
   sku_size            = "Free"
+
+  # The deploy action stamps the source repo onto the site; not ours to manage.
+  lifecycle {
+    ignore_changes = [repository_url, repository_branch]
+  }
 }
 
 # No Log Analytics workspace: keeps it free. Logs via `az containerapp logs show`.
