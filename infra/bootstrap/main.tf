@@ -107,6 +107,7 @@ resource "azurerm_role_definition" "plan_reader" {
     actions = [
       "*/read",
       "Microsoft.Web/staticSites/listSecrets/action",
+      "Microsoft.Web/staticSites/listAppSettings/action",
       "Microsoft.App/containerApps/listSecrets/action",
     ]
   }

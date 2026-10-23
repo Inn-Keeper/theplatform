@@ -16,6 +16,12 @@ variable "image" {
   type = string
 }
 
+# Free subscriptions allow one Container Apps environment per region, so envs can't share one.
+variable "location" {
+  type    = string
+  default = null # resource group's region
+}
+
 # Static Web Apps Free tier is only offered in a few regions.
 variable "swa_location" {
   type    = string
@@ -32,13 +38,18 @@ resource "azurerm_static_web_app" "web" {
   location            = var.swa_location
   sku_tier            = "Free"
   sku_size            = "Free"
+
+  # The deploy action stamps the source repo onto the site; not ours to manage.
+  lifecycle {
+    ignore_changes = [repository_url, repository_branch]
+  }
 }
 
 # No Log Analytics workspace: keeps it free. Logs via `az containerapp logs show`.
 resource "azurerm_container_app_environment" "env" {
   name                = "cae-lambari-${var.env}"
   resource_group_name = data.azurerm_resource_group.env.name
-  location            = data.azurerm_resource_group.env.location
+  location            = coalesce(var.location, data.azurerm_resource_group.env.location)
 
   # Azure adds this profile by default; declaring it stops a perpetual diff. Still free consumption billing.
   workload_profile {

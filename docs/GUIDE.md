@@ -141,18 +141,30 @@ We use **OIDC (OpenID Connect) federation** instead:
     theplatform, environment prd"
     + a short-lived signed token  ───────▶ 2. Checks: is the signature from GitHub?
                                               Does the subject match exactly
-                                              "repo:Inn-Keeper/theplatform:environment:prd"?
+                                              "repo:Inn-Keeper@<owner_id>/theplatform@<repo_id>:environment:prd"?
                                   ◀─────── 3. Yes → here's a 1-hour Azure access token
  4. Runs terraform with it
 ```
 
 - **No stored cloud secret** — nothing to leak or rotate.
 - A fork, another repo, or another branch/environment **can't** get in — the subject won't match.
+- The subject pins GitHub's numeric account and repo IDs, so even renaming the repo or creating a look-alike name can't match.
 - The values stored in GitHub (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) are **identifiers, not passwords**. Knowing them alone grants nothing.
 
 Plus **least privilege**: the dev identity can only touch `rg-lambari-dev`; the prd identity only `rg-lambari-prd`. A bug in dev can't break prd.
 
-The only real secret is `TF_API_TOKEN` (access to HCP state), stored encrypted in GitHub Secrets.
+There are three identities, one per GitHub Environment:
+
+| Environment | Role | Used by |
+|---|---|---|
+| `dev` | Contributor on `rg-lambari-dev` | PR plans + applies for dev |
+| `prd` | Contributor on `rg-lambari-prd` | prd applies — **requires your approval** |
+| `prd-plan` | `lambari-plan-reader` (read + list secrets) on `rg-lambari-prd` | PR plans for prd, no approval needed |
+
+Real secrets, both stored encrypted in GitHub Secrets:
+
+- `TF_API_TOKEN` (theplatform) — access to HCP state.
+- `PLATFORM_DISPATCH_TOKEN` (lambari) — fine-grained PAT that can only trigger theplatform's deploys.
 
 ### What never goes into git
 
@@ -191,12 +203,16 @@ Deliberately **not** used because they cost money: Azure Container Registry, Key
 ```
 theplatform/
 ├── infra/
-│   ├── bootstrap/        # one-time setup, run by hand (✅ done)
-│   ├── modules/app/      # reusable Lambari module (step 2)
-│   └── envs/
-│       ├── dev/          # dev: calls the module (step 2)
-│       └── prd/          # prd: calls the module (step 2)
-├── .github/workflows/    # CI/CD pipelines (steps 3–5)
+│   ├── bootstrap/        # one-time setup, run by hand
+│   ├── modules/app/      # reusable Lambari module
+│   ├── envs/
+│   │   ├── dev/          # dev: East US
+│   │   └── prd/          # prd: Container Apps in East US 2 (see §8)
+│   └── lambari.version   # the Lambari image tag currently deployed
+├── .github/workflows/
+│   ├── terraform.yml     # PR: checks + plan comments
+│   ├── apply.yml         # merge / Lambari release: dev → approval → prd
+│   └── _deploy.yml       # one env: apply + frontend build/upload
 └── docs/GUIDE.md         # this file
 ```
 
@@ -223,18 +239,18 @@ Plus one **$1 budget alert** on the subscription.
 
 Bootstrap's own state stays on the laptop (gitignored) — it can't store state in a backend it's creating.
 
-### Step 2 — The app module (next)
+### Step 2 — The app module ✅ done
 
-[infra/modules/app/](../infra/modules/app/) will define Lambari's runtime:
+[infra/modules/app/](../infra/modules/app/) defines Lambari's runtime:
 
 - **Container Apps Environment** — the shared "cluster" apps run in.
 - **Container App** — runs the API image on port 8080, public HTTPS, health-checked on `/api/health`, 0.25 vCPU / 0.5 GiB, scales 0→1.
 - **Static Web App** — hosts the frontend.
 - **CORS wiring** — the API's `LAMBARI_ALLOWED_ORIGINS` is set to the frontend's URL automatically, so they can talk to each other.
 
-`envs/dev` and `envs/prd` each call this module with their own image tag. Until Lambari's image exists in GHCR (step 4), a Microsoft hello-world image stands in.
+`envs/dev` and `envs/prd` each call this module. Both read the image tag from `infra/lambari.version`.
 
-### Step 3 — Plan on pull request
+### Step 3 — Plan on pull request ✅ done
 
 A workflow that runs on every PR:
 
@@ -243,17 +259,25 @@ fmt check → validate → tflint (linting) → checkov (security scan) → terr
                                                                     → posted as a PR comment
 ```
 
-Reviewers see *exactly* what will change in Azure before approving. Nothing is applied.
+Reviewers see *exactly* what will change in Azure before approving. Nothing is applied. prd is planned with the read-only `prd-plan` identity so PRs don't wait on the approval gate.
 
-### Step 4 — Apply on merge + connect Lambari
+### Step 4 — Apply on merge + connect Lambari ✅ done
 
 ```
 merge to main ─▶ apply dev (automatic) ─▶ apply prd (waits for your approval)
 ```
 
-In the Lambari repo, a workflow builds the Docker image, pushes it to GHCR tagged with the commit SHA (e.g. `sha-abc123`), deploys the frontend, then notifies this repo (`repository_dispatch`) to roll out the new tag.
+In the Lambari repo, the `release` job (after tests pass on `main`) builds the Docker image, pushes it to GHCR tagged with the commit SHA (e.g. `sha-<40 hex chars>`), then notifies this repo (`repository_dispatch`).
 
-Tagging by commit SHA (never `latest`) means every deploy is traceable and **rollback = redeploy the previous tag** (or revert the commit).
+theplatform's `apply` workflow then:
+
+1. **bump** — validates the tag format (it's input from another repo), writes it to `infra/lambari.version`, commits to `main` as `github-actions[bot]`.
+2. **dev** — `terraform apply`, then builds Lambari's frontend *at that same commit* with `VITE_API_BASE` = dev's API URL, and uploads it to dev's Static Web App.
+3. **prd** — waits for your approval, then the same for prd.
+
+The frontend is built per environment because Vite bakes the API URL in at build time. The Static Web App deploy token never leaves theplatform — it's read from Terraform output and masked in logs.
+
+Tagging by commit SHA (never `latest`) means every deploy is traceable. **Rollback = revert the `deploy: lambari sha-…` commit** on `main`; the apply workflow redeploys the previous tag.
 
 ### Step 5 — Hardening
 
@@ -262,11 +286,11 @@ Tagging by commit SHA (never `latest`) means every deploy is traceable and **rol
 
 ---
 
-## 7. How a change flows, end to end (after step 4)
+## 7. How a change flows, end to end
 
 1. You change Lambari's Go code and push.
 2. Lambari's workflow builds image `ghcr.io/inn-keeper/lambari-api:sha-abc123`.
-3. It pings theplatform: "deploy `sha-abc123`".
+3. It pings theplatform: "deploy `sha-abc123`". theplatform commits that tag to `infra/lambari.version`.
 4. theplatform's workflow logs into Azure via OIDC as the **dev** identity, runs `terraform apply` → dev now runs the new image.
 5. The **prd** job pauses. You get a GitHub notification, review, click **Approve**.
 6. It logs in as the **prd** identity and applies → production updated.
@@ -275,7 +299,39 @@ No passwords stored, no portal clicks, every change reviewed and recorded in git
 
 ---
 
-## 8. Glossary
+## 8. Gotchas we hit (read before changing things)
+
+Real problems found while building this, why they happen, and what the code does about them. If you're tempted to "clean up" one of these, read the reason first.
+
+| # | Symptom | Cause | What we did |
+|---|---|---|---|
+| 1 | `MaxNumberOfRegionalEnvironmentsInSubExceeded` (409) when creating prd | Free/trial subscriptions allow **one Container Apps environment per region**. dev holds East US | prd's environment runs in **East US 2** (`location` in [envs/prd/main.tf](../infra/envs/prd/main.tf)). Adding a third env needs a third region |
+| 2 | `AADSTS700213: No matching federated identity record` | GitHub now sends OIDC subjects with numeric IDs: `repo:Inn-Keeper@126582166/theplatform@1429722621:environment:dev` | Federated credentials use that ID-pinned format (bootstrap) |
+| 3 | checkov `CKV_AZURE_249` fails on the federated credentials | The check only understands the old `repo:owner/name` subject | Inline `#checkov:skip` with the reason. Don't revert the subject to silence it |
+| 4 | dev plan always shows "2 to change" on the Container Apps environment | Azure adds a default `Consumption` workload profile | Declared explicitly in the module. Same free billing |
+| 5 | dev plan always shows `repository_url`/`repository_branch` → null on the Static Web App | The SWA deploy action stamps the source repo onto the site | `lifecycle.ignore_changes` on those two fields |
+| 6 | prd PR plan: `403 ... listSecrets` / `listAppSettings` | Built-in Reader can't call list actions, which `plan` needs to refresh SWA / Container Apps | Custom role `lambari-plan-reader` = `*/read` + those list actions. New Azure resource types may need more actions added here |
+| 7 | Provider registration errors in CI | CI identities are RG-scoped and can't register resource providers subscription-wide | `resource_provider_registrations = "none"` in envs; register once by hand: `az provider register --namespace Microsoft.App` |
+| 8 | Lambari's release job: `gh: set the GH_TOKEN` | `PLATFORM_DISPATCH_TOKEN` secret missing or expired | Recreate the PAT (see renewals below) |
+| 9 | tflint: `required_version attribute is required` | tflint wants it in every module, not just root | Declared in the module |
+
+### Renewals and deadlines
+
+| What | When | How |
+|---|---|---|
+| Azure Free Trial → **upgrade to Pay-As-You-Go** | Before 30 days from signup | Portal → Subscriptions → Upgrade. Without it the subscription is disabled. Free tiers stay free after upgrade |
+| `PLATFORM_DISPATCH_TOKEN` (fine-grained PAT, 90 days) | ~2027-01-21 | Regenerate (only `theplatform`, Contents read/write), then `gh secret set PLATFORM_DISPATCH_TOKEN --repo Inn-Keeper/lambari` |
+| `TF_API_TOKEN` (HCP team token) | Expiry you chose at creation | HCP → Settings → Teams → owners → regenerate, then `gh secret set TF_API_TOKEN` |
+
+### Good to know
+
+- **GHCR visibility:** the image inherited Lambari's public visibility, so Azure pulls it anonymously. If it ever becomes private, Container Apps will fail to pull.
+- **Commit email:** commits use the GitHub noreply address (`126582166+Inn-Keeper@users.noreply.github.com`), set per repo. Your global git config still has your personal email — new repos will use it unless changed.
+- **Error logs show the subscription ID.** It's an identifier, not a secret, but the repo is public, so Terraform errors in Actions logs reveal it. Nothing can be done with it alone.
+
+---
+
+## 9. Glossary
 
 | Term | One-liner |
 |---|---|

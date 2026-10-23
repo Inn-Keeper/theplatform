@@ -18,8 +18,9 @@ provider "azurerm" {
 }
 
 module "app" {
-  source = "../../modules/app"
-  env    = "prd"
+  source   = "../../modules/app"
+  env      = "prd"
+  location = "eastus2" # dev holds the one East US environment a free subscription allows
   # Bumped by the apply workflow on each Lambari release; revert the commit to roll back.
   image = "ghcr.io/inn-keeper/lambari-api:${trimspace(file("${path.module}/../../lambari.version"))}"
 }
