@@ -1,0 +1,78 @@
+name: terraform
+
+on:
+  pull_request:
+    paths:
+      - "infra/envs/**"
+      - "infra/modules/**"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive infra
+      - uses: terraform-linters/setup-tflint@v4
+      - run: tflint --init && tflint --recursive --chdir infra
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra
+          framework: terraform
+          quiet: true
+
+  plan:
+    needs: checks
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: dev
+            environment: dev
+          # Read-only identity: plans prd without waiting on the apply approval gate.
+          - dir: prd
+            environment: prd-plan
+    environment: ${{ matrix.environment }}
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchange with Azure
+      pull-requests: write # plan comment
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
+      TF_IN_AUTOMATION: "true"
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: terraform init -input=false
+      - run: terraform plan -input=false -no-color -lock-timeout=5m | tee plan.txt
+        shell: bash -o pipefail {0}
+      - name: Comment plan on PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### \`${{ matrix.dir }}\` plan: ${{ job.status }}"
+            echo '<details><summary>Show plan</summary>'
+            echo
+            echo '```'
+            # PR comments cap at 65k chars; the tail holds the summary line.
+            tail -c 60000 plan.txt 2>/dev/null || echo "plan did not run"
+            echo '```'
+            echo '</details>'
+          } > comment.md
+          gh pr comment ${{ github.event.pull_request.number }} --body-file comment.md
