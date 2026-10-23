@@ -2,6 +2,7 @@
 # The resource group is created by bootstrap; this module only fills it.
 
 terraform {
+  required_version = ">= 1.9"
   required_providers {
     azurerm = { source = "hashicorp/azurerm", version = "~> 4.0" }
   }
@@ -44,6 +45,12 @@ resource "azurerm_container_app_environment" "env" {
   name                = "cae-lambari-${var.env}"
   resource_group_name = data.azurerm_resource_group.env.name
   location            = data.azurerm_resource_group.env.location
+
+  # Azure adds this profile by default; declaring it stops a perpetual diff. Still free consumption billing.
+  workload_profile {
+    name                  = "Consumption"
+    workload_profile_type = "Consumption"
+  }
 }
 
 resource "azurerm_container_app" "api" {
@@ -51,6 +58,7 @@ resource "azurerm_container_app" "api" {
   resource_group_name          = data.azurerm_resource_group.env.name
   container_app_environment_id = azurerm_container_app_environment.env.id
   revision_mode                = "Single"
+  workload_profile_name        = "Consumption"
 
   ingress {
     external_enabled = true

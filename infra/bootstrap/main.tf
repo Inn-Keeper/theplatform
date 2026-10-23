@@ -37,6 +37,13 @@ variable "location" {
 
 locals {
   envs = toset(["dev", "prd"])
+
+  # One CI identity per GitHub Environment. prd-plan lets PRs plan prd without the apply approval gate.
+  identities = {
+    dev        = { env = "dev", role = "Contributor" }
+    prd        = { env = "prd", role = "Contributor" }
+    "prd-plan" = { env = "prd", role = "lambari-plan-reader" }
+  }
 }
 
 provider "azurerm" {
@@ -61,31 +68,48 @@ resource "azurerm_resource_group" "env" {
 }
 
 resource "azuread_application" "gh" {
-  for_each     = local.envs
+  for_each     = local.identities
   display_name = "gh-${var.repo}-${each.key}"
 }
 
 resource "azuread_service_principal" "gh" {
-  for_each  = local.envs
+  for_each  = local.identities
   client_id = azuread_application.gh[each.key].client_id
 }
 
 # Only workflow jobs running in this repo's matching GitHub Environment can assume the identity.
 resource "azuread_application_federated_identity_credential" "gh" {
-  for_each       = local.envs
+  #checkov:skip=CKV_AZURE_249:Check only parses the legacy repo:owner/name subject; the ID-pinned subject below is stricter.
+  for_each       = local.identities
   application_id = azuread_application.gh[each.key].id
   display_name   = "github-${each.key}"
   issuer         = "https://token.actions.githubusercontent.com"
   audiences      = ["api://AzureADTokenExchange"]
-  subject        = "repo:${var.github_owner}/${var.repo}:environment:${each.key}"
+  # GitHub's ID-pinned subject format: survives owner/repo renames and blocks look-alike repos.
+  subject = "repo:${var.github_owner}@${data.github_user.me.id}/${var.repo}@${data.github_repository.this.repo_id}:environment:${each.key}"
 }
 
 # Least privilege: each identity can only touch its own resource group.
 resource "azurerm_role_assignment" "gh" {
-  for_each             = local.envs
-  scope                = azurerm_resource_group.env[each.key].id
-  role_definition_name = "Contributor"
+  for_each             = local.identities
+  scope                = azurerm_resource_group.env[each.value.env].id
+  role_definition_name = each.value.role
   principal_id         = azuread_service_principal.gh[each.key].object_id
+  depends_on           = [azurerm_role_definition.plan_reader]
+}
+
+# Reader can't call listSecrets, which `terraform plan` needs to refresh these resources.
+resource "azurerm_role_definition" "plan_reader" {
+  name  = "lambari-plan-reader"
+  scope = azurerm_resource_group.env["prd"].id
+
+  permissions {
+    actions = [
+      "*/read",
+      "Microsoft.Web/staticSites/listSecrets/action",
+      "Microsoft.App/containerApps/listSecrets/action",
+    ]
+  }
 }
 
 resource "azurerm_consumption_budget_subscription" "guard" {
@@ -129,8 +153,12 @@ data "github_user" "me" {
   username = var.github_owner
 }
 
+data "github_repository" "this" {
+  name = var.repo
+}
+
 resource "github_repository_environment" "env" {
-  for_each    = local.envs
+  for_each    = local.identities
   repository  = var.repo
   environment = each.key
 
@@ -145,7 +173,7 @@ resource "github_repository_environment" "env" {
 # Identifiers, not secrets — safe as plain variables.
 resource "github_actions_environment_variable" "azure" {
   for_each = {
-    for pair in setproduct(local.envs, ["AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"]) :
+    for pair in setproduct(keys(local.identities), ["AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID"]) :
     "${pair[0]}/${pair[1]}" => { env = pair[0], name = pair[1] }
   }
   repository    = var.repo
@@ -159,5 +187,5 @@ resource "github_actions_environment_variable" "azure" {
 }
 
 output "client_ids" {
-  value = { for e in local.envs : e => azuread_application.gh[e].client_id }
+  value = { for k, _ in local.identities : k => azuread_application.gh[k].client_id }
 }
