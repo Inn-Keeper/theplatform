@@ -1,0 +1,73 @@
+name: deploy
+
+# One environment: terraform apply, then build Lambari's frontend against that env's API and upload it.
+on:
+  workflow_call:
+    inputs:
+      env:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    permissions:
+      contents: read
+      id-token: write # OIDC token exchange with Azure
+    env:
+      ARM_USE_OIDC: "true"
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      TF_TOKEN_app_terraform_io: ${{ secrets.TF_API_TOKEN }}
+      TF_IN_AUTOMATION: "true"
+    defaults:
+      run:
+        working-directory: infra/envs/${{ inputs.env }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: terraform init -input=false
+      - run: terraform apply -auto-approve -input=false -no-color -lock-timeout=5m
+
+      - id: out
+        run: |
+          echo "api_url=$(terraform output -raw api_url)" >> "$GITHUB_OUTPUT"
+          token=$(terraform output -raw swa_deploy_token)
+          echo "::add-mask::$token"
+          echo "swa_token=$token" >> "$GITHUB_OUTPUT"
+          echo "lambari_sha=$(sed 's/^sha-//' ../../lambari.version)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Inn-Keeper/lambari
+          ref: ${{ steps.out.outputs.lambari_sha }}
+          path: lambari
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: lambari/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: lambari/pnpm-lock.yaml
+      - name: Build frontend
+        working-directory: lambari
+        env:
+          VITE_API_BASE: ${{ steps.out.outputs.api_url }}
+        run: pnpm install --frozen-lockfile && pnpm build
+      - uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ steps.out.outputs.swa_token }}
+          action: upload
+          app_location: lambari/frontend/dist
+          skip_app_build: true
+          skip_api_build: true

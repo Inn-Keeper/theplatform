@@ -16,12 +16,6 @@ variable "image" {
   type = string
 }
 
-# ponytail: only here because the placeholder image listens on 80; drop once Lambari's image ships (step 4).
-variable "port" {
-  type    = number
-  default = 8080
-}
-
 # Static Web Apps Free tier is only offered in a few regions.
 variable "swa_location" {
   type    = string
@@ -62,7 +56,7 @@ resource "azurerm_container_app" "api" {
 
   ingress {
     external_enabled = true
-    target_port      = var.port
+    target_port      = 8080
     traffic_weight {
       latest_revision = true
       percentage      = 100
@@ -74,12 +68,17 @@ resource "azurerm_container_app" "api" {
     min_replicas = 0
     max_replicas = 1
 
-    # ponytail: default TCP probes; add an HTTP probe on /api/health once the real image is deployed.
     container {
       name   = "api"
       image  = var.image
       cpu    = 0.25
       memory = "0.5Gi"
+
+      liveness_probe {
+        transport = "HTTP"
+        port      = 8080
+        path      = "/api/health"
+      }
 
       # Same demo limits as Lambari's render.yaml, sized for 0.5 GiB.
       env {

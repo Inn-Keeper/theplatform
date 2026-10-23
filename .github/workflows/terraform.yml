@@ -5,6 +5,7 @@ on:
     paths:
       - "infra/envs/**"
       - "infra/modules/**"
+      - "infra/lambari.version"
       - ".github/workflows/terraform.yml"
 
 permissions:

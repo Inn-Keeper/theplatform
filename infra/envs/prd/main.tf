@@ -17,22 +17,11 @@ provider "azurerm" {
   resource_provider_registrations = "none"
 }
 
-# ponytail: placeholder until Lambari's image is on GHCR (step 4).
-variable "image" {
-  type    = string
-  default = "mcr.microsoft.com/k8se/quickstart:latest"
-}
-
-variable "port" {
-  type    = number
-  default = 80
-}
-
 module "app" {
   source = "../../modules/app"
   env    = "prd"
-  image  = var.image
-  port   = var.port
+  # Bumped by the apply workflow on each Lambari release; revert the commit to roll back.
+  image = "ghcr.io/inn-keeper/lambari-api:${trimspace(file("${path.module}/../../lambari.version"))}"
 }
 
 output "api_url" {

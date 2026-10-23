@@ -1,0 +1,69 @@
+name: apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/envs/**"
+      - "infra/modules/**"
+      - "infra/lambari.version"
+      - ".github/workflows/apply.yml"
+      - ".github/workflows/_deploy.yml"
+  repository_dispatch:
+    types: [lambari-release] # sent by Lambari's CI after it pushes an image
+
+# One rollout at a time; a newer one queues behind the current one.
+concurrency:
+  group: apply
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      ref: ${{ steps.commit.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: commit
+        env:
+          TAG: ${{ github.event.client_payload.tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            # Untrusted input from another repo: accept only an exact commit-SHA tag.
+            [[ "$TAG" =~ ^sha-[0-9a-f]{40}$ ]] || { echo "invalid tag: $TAG"; exit 1; }
+            echo "$TAG" > infra/lambari.version
+            if ! git diff --quiet; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -am "deploy: lambari $TAG"
+              git push
+            fi
+          fi
+          echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  dev:
+    needs: bump
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      env: dev
+      ref: ${{ needs.bump.outputs.ref }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
+
+  prd:
+    needs: [bump, dev]
+    uses: ./.github/workflows/_deploy.yml
+    with:
+      env: prd # environment requires manual approval
+      ref: ${{ needs.bump.outputs.ref }}
+    secrets: inherit
+    permissions:
+      contents: read
+      id-token: write
