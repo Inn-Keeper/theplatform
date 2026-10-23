@@ -29,7 +29,7 @@ Then give CI access to state (team token from HCP → Settings → Teams → own
 gh secret set TF_API_TOKEN
 ```
 
-Verify OIDC trust (subject must be `repo:Inn-Keeper/theplatform:environment:<env>`):
+Verify OIDC trust (subject must be `repo:Inn-Keeper@<owner_id>/theplatform@<repo_id>:environment:<env>`, GitHub's ID-pinned format):
 
 ```sh
 az ad app federated-credential list --id <client_id> --query "[].subject"

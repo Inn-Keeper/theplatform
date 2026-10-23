@@ -84,7 +84,8 @@ resource "azuread_application_federated_identity_credential" "gh" {
   display_name   = "github-${each.key}"
   issuer         = "https://token.actions.githubusercontent.com"
   audiences      = ["api://AzureADTokenExchange"]
-  subject        = "repo:${var.github_owner}/${var.repo}:environment:${each.key}"
+  # GitHub's ID-pinned subject format: survives owner/repo renames and blocks look-alike repos.
+  subject = "repo:${var.github_owner}@${data.github_user.me.id}/${var.repo}@${data.github_repository.this.repo_id}:environment:${each.key}"
 }
 
 # Least privilege: each identity can only touch its own resource group.
@@ -149,6 +150,10 @@ resource "tfe_workspace_settings" "env" {
 
 data "github_user" "me" {
   username = var.github_owner
+}
+
+data "github_repository" "this" {
+  name = var.repo
 }
 
 resource "github_repository_environment" "env" {
